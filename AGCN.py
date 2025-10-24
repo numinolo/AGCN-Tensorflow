@@ -136,7 +136,7 @@ class AGCN(Model):
     def __init__(self, out_dim, mu, n_layers,adj,lambda1=1000,lambda2=1000,alpha=1,enc=None,dec=None,trainable=False,**kwargs):
         super(AGCN, self).__init__(**kwargs)
         self.n_layers = n_layers # [500,500,2000,10]
-        self.out_dim = out_dim # total label / cluster
+        self.out_dim = out_dim # total label
         self.alpha = alpha
         self.lambda1 = lambda1
         self.lambda2 = lambda2
