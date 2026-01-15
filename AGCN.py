@@ -1,222 +1,192 @@
 import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Layer, Dense, Input, LeakyReLU
-from tensorflow.keras.losses import Loss, KLDivergence, MSE
+import tensorflow.keras.layers as layers
+import tensorflow.keras.losses as losses
+from tensorflow.keras.models import Sequential,Model
+from tensorflow.keras.optimizers import Adam
+import numpy as np
 
 
 
-class AutoEncoder(Layer):
-    def __init__(self,n_layers,**kwargs):
-        super(AutoEncoder, self).__init__(**kwargs)
-        self.n_layers = n_layers # i.e. [256,500,500,2000,10]
+@tf.keras.utils.register_keras_serializable(package='AutoEncoder')
+class AutoEncoder(Model):
+    def __init__(self,input_dim,layer=[500,500,2000,10],**kwargs):
+        super(AutoEncoder,self).__init__(**kwargs)
+        self.layer = layer
+        self.input_dim = input_dim
 
-    def build(self,ishape):
-        # Encoder
-        self.encoder = []
-        for i,lyr in enumerate(self.n_layers[1:]): # i.e. [500,500,2000,10]
-            en = Dense(lyr,name=f'encoder_{i+1}')
-            self.encoder.append(en)
+        tmp = [layers.Input(shape=(input_dim,))]
+        for i in layer[:-1]:
+            tmp.append(layers.Dense(i,activation='relu'))
+        tmp.append(layers.Dense(layer[-1]))
+        self.encoder = Sequential(tmp)
 
-        # Decoder
-        self.decoder = []
-        for i,lyr in enumerate(list(reversed(self.n_layers))[1:]): # i.e. [2000,500,500,256]
-            de = Dense(lyr,name=f'decoder_{i+1}')
-            self.decoder.append(de)
+        tmp = [layers.Input(shape=(layer[-1],))]
+        for i in layer[::-1][1:]:
+            tmp.append(layers.Dense(i,activation='relu'))
+        tmp.append(layers.Dense(input_dim))
+        self.decoder = Sequential(tmp)
 
-    def call(self,X):
-        # Assume:
-        # - X.shape = (5000,256)
+    def build(self,input_shape):
+        super(AutoEncoder, self).build(input_shape)
 
-        # variable
-        _encoder = []
-        _decoder = []
+    def get_config(self):
+        base_config = super().get_config()
+        config = {
+            'input_dim':self.input_dim,
+            'layer':self.layer,
+        }
+        return {**base_config, **config}
 
-        # Encoder
-        h = X
-        for lyr in self.encoder:
-            h = lyr(h)
-            _encoder.append(h)
-
-        # Decoder
-        d = tf.cast(_encoder[-1],dtype=tf.float32)
-        ii = 0
-        for lyr in self.decoder:
-            d = lyr(d)
-            _decoder.append(d)
-
-        return _encoder,_decoder
+    def call(self,x):
+        enc = self.encoder(x)
+        return self.decoder(enc)
 
 
 
-class GCN(Layer):
-    def __init__(self,units,adj,active=True,**kwargs):
-        super(GCN, self).__init__(**kwargs)
+class GCN(layers.Layer):
+    def __init__(self,units,lr=True):
+        super().__init__()
         self.units = units
-        self.active = active
-        self.dense = Dense(units)
-        self.adj = adj
+        self.lr = lr
+
+    def build(self,input_shape):
+        super(GCN, self).build(input_shape)
+        self.w = self.add_weight(
+            shape=(input_shape[0][-1],self.units),
+            trainable=True,
+            initializer='glorot_uniform',
+        )
 
     def call(self,inputs):
-        # Assume:
-        # - X.shape = (5000,256)
-        # - A.shape = (5000,5000)
-        X = inputs
+        x,a = inputs
+        res = tf.matmul(a,tf.matmul(x,self.w))
+        if self.lr:
+            return tf.nn.leaky_relu(res, alpha=0.2)
+        return tf.nn.softmax(res,axis=-1)
 
-        res = tf.matmul(self.adj,self.dense(X)) # A(5000,5000) * X(5000,256) * W(256,units) -> (5000,units)
-        if self.active:
-            return tf.nn.leaky_relu(res,0.2) # Size (5000,units)
-        else:
-            return tf.nn.softmax(res, axis=-1) # Size (5000,units)
-
-
-
-class AGCN_H(Layer):
-    def __init__(self,units,adj,**kwargs):
-        super(AGCN_H, self).__init__(**kwargs)
+class AGCN_H(layers.Layer):
+    def __init__(self,units):
+        super().__init__()
         self.units = units
-        self.gcn = GCN(self.units,adj)
-        self.dense = Dense(2)
+        self.gcn = GCN(units)
+        self.fc_att = layers.Dense(2)
+
+    def build(self,input_shape):
+        super(AGCN_H, self).build(input_shape)
 
     def call(self,inputs):
-        # Assume:
-        # - z.shape = (5000,500) | Neuron of each layer
-        # - h.shape = (5000,500) | Neuron of each layer
-        z,h = inputs
+        z,h,a = inputs
+        zh = tf.concat([z,h],-1)
+        att = self.fc_att(zh)
+        att = tf.nn.leaky_relu(att, alpha=0.2)
+        att = tf.nn.softmax(att,axis=-1)
+        att = tf.nn.l2_normalize(att,axis=1)
+        m1,m2 = tf.expand_dims(att[:,0],-1),tf.expand_dims(att[:,1],-1)
+        nz = m1 * z
+        nh = m2 * h
+        return self.gcn((nz+nh,a))
 
-        # calculate attention of each z
-        zh = tf.concat([z,h],-1) # Size (5000,1000)
-        mi = self.dense(zh) # Size (5000,2)
-        mi = tf.nn.leaky_relu(mi,0.2)
-        mi = tf.nn.softmax(mi, axis=-1)
-        mi = tf.math.l2_normalize(mi, axis=-1) # (5000,2)
+class AGCN_S(layers.Layer):
+    def __init__(self,units,input_len):
+        super().__init__()
+        self.units = units
+        self.input_len = input_len
+        self.gcn = GCN(units,lr=False)
+        self.fc_att = layers.Dense(input_len)
 
-        mi1 = tf.reshape(mi[:,0],(mi.shape[0],1)) # (5000,1)
-        mi2 = tf.reshape(mi[:,1],(mi.shape[0],1)) # (5000,1)
-
-        weighted_Z = mi1 * z
-        weighted_H = mi2 * h
-
-        Z = weighted_Z + weighted_H #  Size (5000,500)
-        new_Z = self.gcn(Z) # Size (5000,units)
-        return new_Z
-
-
-
-
-
-class AGCN_S(Layer):
-    def __init__(self,lyr,units,adj,**kwargs):
-        super(AGCN_S, self).__init__(**kwargs)
-        self.units = units # out neuron
-
-        self.dense = Dense(lyr)
-        self.gcn = GCN(self.units,adj,active=False)
+    def build(self,input_shape):
+        super(AGCN_S, self).build(input_shape)
 
     def call(self,inputs):
-        Z = inputs
-        # Assume 5000 sample data with 4 layers [500,500,2000,10] + Encoder Latest Layer [10]
-        # Z = [z1,z2,z3,...] | Size (5,5000,(500/500/2000/10/10))
-        U = tf.concat(Z,-1) # (5000,3020)
-        U = self.dense(U) # (5000,5)
-        U = tf.nn.leaky_relu(U,0.2)
-        U = tf.nn.softmax(U, axis=-1)
-        U = tf.math.l2_normalize(U, axis=-1) # attention weight of each layer -> (5000,5)
+        inp = tf.concat(inputs,-1)
+        att = self.fc_att(inp)
+        att = tf.nn.leaky_relu(att, alpha=0.2)
+        att = tf.nn.softmax(att,axis=-1)
+        att = tf.nn.l2_normalize(att,axis=1)
 
-        wZ = [] # (5,5000,(500/500/2000/10/10))
-        for i in range(len(Z)):
-            ui = tf.reshape(U[:,i],(U.shape[0],1)) # (5000,1)
-            wZ.append(ui * Z[i])
-        ZZ = tf.concat(wZ,-1) # (5000,3020)
-        nZ = self.gcn(ZZ) # (5000,units)
-        return nZ
-
-
+        nx = []
+        for i in range(self.input_len):
+            nx.append(inputs[i] * tf.expand_dims(att[:,i],-1))
+        nx = tf.concat(nx,-1)
+        return self.gcn((nx,a))
 
 class AGCN(Model):
-    def __init__(self, out_dim, mu, n_layers,adj,lambda1=1000,lambda2=1000,alpha=1,enc=None,dec=None,trainable=False,**kwargs):
-        super(AGCN, self).__init__(**kwargs)
-        self.n_layers = n_layers # [500,500,2000,10]
-        self.out_dim = out_dim # total label
-        self.alpha = alpha
+    def __init__(self,n_cluster,input_dim,centroid,layer,lambda1,lambda2,pretrained=None):
+        super().__init__()
+        self.n_cluster = n_cluster
+        self.input_dim = input_dim
+        self.centroid = centroid
+        self.layer = layer
+        self.pretrained = pretrained
         self.lambda1 = lambda1
         self.lambda2 = lambda2
-        self.enc = enc
-        self.dec = dec
-        self.mu = mu # centroid
-        self.agcns = AGCN_S(len(n_layers)+1,self.out_dim,adj,name='agcn_s')
-        self.init_gcn = GCN(self.n_layers[0],adj)
-        self.AGCNH = []
-        self.adj = adj
-        self.trainable = trainable # freeze the learning weight of auto encoder if set to false
+        self.centroid_shape = np.shape(centroid)
+        self.eps = 1e-10
 
-    def build(self,ishape):
-        # AGCN-H
-        for i,lyr in enumerate(self.n_layers[1:]):
-            ly = AGCN_H(lyr,self.adj,name=f'agcn_h_{i+1}')
-            self.AGCNH.append(ly)
-        # AE
-        self.ae = AutoEncoder([ishape[-1]]+self.n_layers,name='auto_encoder')
-        if self.enc != None:
-            self.ae.encoder = self.enc
-            for i in range(len(self.ae.encoder)):
-                self.ae.encoder[i].trainable = self.trainable
-        if self.dec != None:
-            self.ae.decoder = self.dec
-            for i in range(len(self.ae.decoder)):
-                self.ae.decoder[i].trainable = self.trainable
-
-    def kl_divergence(self,p, q):
-        return tf.reduce_sum(p * tf.math.log(p / (q + 1e-8)), axis=1)
-
-    def compute_q(self,features, centers):
-        distances = tf.reduce_sum(tf.square(features - centers), axis=2)  # (n_samples, n_clusters)
-        # Student's t-distribution
-        q = tf.pow(1.0 + distances / self.alpha, -(self.alpha + 1.0) / 2.0)
-        # Normalize to get probabilities
-        q = q / tf.reduce_sum(q, axis=1, keepdims=True)
-        return q
-
-    def compute_p(self,q):
-        numerator = tf.square(q) / tf.reduce_sum(q, axis=0, keepdims=True)  # Soft cluster frequencies
-        p = numerator / tf.reduce_sum(numerator, axis=1, keepdims=True)     # Normalize per sample
-        return p
-
-    def call(self, inputs):
-        X = inputs
-
-        # variable
-        _agcnh = []
-
-        # AutoEncoder
-        _encoder,_decoder = self.ae(X)
+    def build(self,input_shape):
+        # Auto Encoder
+        if self.pretrained == None:
+            self.auto_encoder = AutoEncoder(self.input_dim,layer=self.layer)
+        else:
+            self.auto_encoder = self.pretrained
 
         # AGCN-H
-        z = self.init_gcn(X)
-        _agcnh.append(z)
-        for i,lyr in enumerate(self.AGCNH):
-            h = _encoder[i]
-            z = lyr((z,h))
-            _agcnh.append(z)
+        self.init_gcn = GCN(self.layer[0])
+        self.agcnh = []
+        for i in self.layer[1:]:
+            self.agcnh.append(AGCN_H(i))
 
         # AGCN-S
-        _agcnh.append(_encoder[-1])
-        pred = self.agcns(_agcnh) # (5000,10)
+        self.agcns = AGCN_S(self.n_cluster,len(self.layer)+1)
 
-        # Calc q
-        # -> H_latest = (1000,10) -> (1000,1,10)
-        # -> cl = (10,10) -> (1,10,10)
-        hl = tf.expand_dims(_encoder[-1],axis=1)
-        cl = tf.expand_dims(self.mu,axis=0)
-        q = self.compute_q(hl,cl)
+        self.centroid_weight = self.add_weight(
+            shape=self.centroid_shape,
+            trainable=True,
+            initializer=tf.constant_initializer(self.centroid),
+        )
+        super(AGCN, self).build(input_shape)
+
+    def call(self,inputs):
+        x,a = inputs
+
+        # run encoder
+        enc = []
+        tmpx = x
+        for l in self.auto_encoder.encoder.layers:
+            tmpx = l(tmpx)
+            enc.append(tmpx)
+        dec = self.auto_encoder.decoder(tmpx)
+
+        # run AGCN-H
+        tmpx = self.init_gcn((x,a))
+        _agcnh = [tmpx]
+        for idx,l in enumerate(self.agcnh):
+            tmpx = l((tmpx,enc[idx],a))
+            _agcnh.append(tmpx)
+
+        # run AGCN-S
+        tmpx = _agcnh + [enc[-1]]
+        result = self.agcns(tmpx)
+
+        # calculate q
+        q = 1.0 / (1.0 + tf.reduce_sum(tf.pow(tf.expand_dims(enc[-1],1) - self.centroid_weight, 2), 2) / 1.0)
+        q = tf.pow(q,(1.0 + 1.0) / 2.0)
+        q = q / tf.reduce_sum(q, axis=1,keepdims=True)
 
         # calculate p
-        p = self.compute_p(q)
+        p = tf.pow(q,2) / tf.reduce_sum(q,0)
+        p = p / tf.reduce_sum(p, axis=1,keepdims=True)
+        p = tf.stop_gradient(p)
 
         # calculate loss
-        kl_loss = tf.reduce_mean(self.kl_divergence(p, q))
-        ce_loss = tf.reduce_mean(self.kl_divergence(p, pred))
-        re_loss = tf.reduce_mean(MSE(X,_decoder[-1]))
+        q_loss = tf.reduce_mean(
+            tf.reduce_sum(p * tf.math.log((p + self.eps) / (q + self.eps)), axis=1)
+            ) * self.lambda1
+        pred_loss = tf.reduce_mean(
+            tf.reduce_sum(p * tf.math.log((p + self.eps) / (result + self.eps)), axis=1)
+            ) * self.lambda2
+        mse = tf.reduce_mean(losses.MSE(dec,x),0)
 
-        loss = self.lambda1 * kl_loss + self.lambda2 * ce_loss + re_loss
-        self.add_loss(loss)
-        return pred
+        self.add_loss(mse + q_loss + pred_loss)
+
+        return tf.argmax(result,-1)
