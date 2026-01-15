@@ -29,10 +29,6 @@ a = tf.cast(a, dtype=tf.float32) + tf.eye(tf.shape(a)[0])
 rowsum = tf.reduce_sum(a, axis=1, keepdims=True)
 rowsum = tf.where(tf.math.equal(rowsum, 0), tf.ones_like(rowsum), rowsum)
 a = tf.divide(a, rowsum)
-
-print('A:',a.shape)
-print('X:',x.shape)
-print('Y:',y.shape)
 ```
 The adjacency matrix need to be normalize outside the model to reduce training time.
 
