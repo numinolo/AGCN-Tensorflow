@@ -97,7 +97,8 @@ class AGCN_S(layers.Layer):
     def build(self,input_shape):
         super(AGCN_S, self).build(input_shape)
 
-    def call(self,inputs):
+    def call(self,dx):
+        inputs,a = dx
         inp = tf.concat(inputs,-1)
         att = self.fc_att(inp)
         att = tf.nn.leaky_relu(att, alpha=0.2)
@@ -166,7 +167,7 @@ class AGCN(Model):
 
         # run AGCN-S
         tmpx = _agcnh + [enc[-1]]
-        result = self.agcns(tmpx)
+        result = self.agcns([tmpx,a])
 
         # calculate q
         q = 1.0 / (1.0 + tf.reduce_sum(tf.pow(tf.expand_dims(enc[-1],1) - self.centroid_weight, 2), 2) / 1.0)
