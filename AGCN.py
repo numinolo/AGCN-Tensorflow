@@ -97,8 +97,8 @@ class AGCN_S(layers.Layer):
     def build(self,input_shape):
         super(AGCN_S, self).build(input_shape)
 
-    def call(self,dx):
-        inputs,a = dx
+    def call(self,inx):
+        inputs,a = inx
         inp = tf.concat(inputs,-1)
         att = self.fc_att(inp)
         att = tf.nn.leaky_relu(att, alpha=0.2)
@@ -112,7 +112,7 @@ class AGCN_S(layers.Layer):
         return self.gcn((nx,a))
 
 class AGCN(Model):
-    def __init__(self,n_cluster,input_dim,centroid,layer,lambda1,lambda2,pretrained=None):
+    def __init__(self,n_cluster,input_dim,centroid,layer,adj,lambda1,lambda2,pretrained=None):
         super().__init__()
         self.n_cluster = n_cluster
         self.input_dim = input_dim
@@ -123,6 +123,7 @@ class AGCN(Model):
         self.lambda2 = lambda2
         self.centroid_shape = np.shape(centroid)
         self.eps = 1e-10
+        self.adj = adj
 
     def build(self,input_shape):
         # Auto Encoder
@@ -147,9 +148,7 @@ class AGCN(Model):
         )
         super(AGCN, self).build(input_shape)
 
-    def call(self,inputs):
-        x,a = inputs
-
+    def call(self,x):
         # run encoder
         enc = []
         tmpx = x
@@ -159,15 +158,15 @@ class AGCN(Model):
         dec = self.auto_encoder.decoder(tmpx)
 
         # run AGCN-H
-        tmpx = self.init_gcn((x,a))
+        tmpx = self.init_gcn((x,self.adj))
         _agcnh = [tmpx]
         for idx,l in enumerate(self.agcnh):
-            tmpx = l((tmpx,enc[idx],a))
+            tmpx = l((tmpx,enc[idx],self.adj))
             _agcnh.append(tmpx)
 
         # run AGCN-S
         tmpx = _agcnh + [enc[-1]]
-        result = self.agcns([tmpx,a])
+        result = self.agcns((tmpx,self.adj))
 
         # calculate q
         q = 1.0 / (1.0 + tf.reduce_sum(tf.pow(tf.expand_dims(enc[-1],1) - self.centroid_weight, 2), 2) / 1.0)
