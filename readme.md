@@ -48,7 +48,7 @@ AE.save('pretrained.keras')
 AE = tf.keras.models.load_model('pretrained.keras')
 lambda1 = 0.1
 lambda2 = 0.01
-model = AGCN(N_CLUSTER,x.shape[-1],kmeans.cluster_centers_,LAYER,lambda1,lambda2,pretrained=AE)
+model = AGCN(N_CLUSTER,x.shape[-1],kmeans.cluster_centers_,LAYER,a,lambda1,lambda2,pretrained=AE)
 model.compile(Adam(learning_rate=0.001))
-model.fit([x,a],batch_size=x.shape[0],epochs=200)
+model.fit(x,batch_size=x.shape[0],epochs=200)
 ```
